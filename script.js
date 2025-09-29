@@ -20,12 +20,11 @@ const hoverPreview = document.getElementById("hoverPreview");
 const hoverImg = document.getElementById("hoverImg");
 const lightbox = document.getElementById("lightbox");
 const lightboxImg = document.getElementById("lightboxImg");
-
 const HAS_OFFSCREEN = typeof OffscreenCanvas !== "undefined";
-
 const logoMode = document.getElementById("logoMode");
 const logoAlpha = document.getElementById("logoAlpha");
 const logoAlphaVal = document.getElementById("logoAlphaVal");
+const tintColor = document.getElementById("tintColor");
 
 logoAlpha.addEventListener("input", () => {
   logoAlphaVal.textContent = logoAlpha.value + "%";
@@ -406,9 +405,10 @@ async function buildSVGString({
 
   const tintRect =
     blendPct > 0
-      ? `<rect x="0" y="0" width="${W}" height="${H}" fill="#dddddd" opacity="${(
-          blendPct / 100
-        ).toFixed(3)}" />`
+      ? `<rect x="0" y="0" width="${W}" height="${H}" fill="${
+          tintColor.value || "#dddddd"
+        }"
+              opacity="${(blendPct / 100).toFixed(3)}" />`
       : "";
 
   const baseSvgOpen = `<?xml version="1.0" encoding="UTF-8"?>
@@ -506,7 +506,7 @@ async function render() {
   const blendPct = parseInt(blend.value || 0, 10);
   if (blendPct > 0) {
     mctx.globalCompositeOperation = "multiply";
-    mctx.fillStyle = "#dddddd";
+    mctx.fillStyle = tintColor.value || "#dddddd";
     mctx.globalAlpha = blendPct / 100;
     mctx.fillRect(0, 0, W, H);
     mctx.globalAlpha = 1;
