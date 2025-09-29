@@ -128,15 +128,28 @@ function setSize(w, h) {
 }
 
 dlSvgBtn.addEventListener("click", async () => {
-  // Use the same current settings as the PNG render
   const W = cv.width;
   const H = cv.height;
   const C = Math.max(10, Math.min(400, parseInt(cols.value || 60, 10)));
   const R = Math.max(10, Math.min(400, parseInt(rows.value || 60, 10)));
   const layoutMode = layout.value;
   const blendPct = parseInt(blend.value || 0, 10);
+  const mode = logoMode.value; // "overlay" | "mask"
+  const overlayAlpha = Math.max(
+    0,
+    Math.min(1, parseInt(logoAlpha.value || "80", 10) / 100)
+  );
 
-  const svgString = await buildSVGString({ W, H, C, R, layoutMode, blendPct });
+  const svgString = await buildSVGString({
+    W,
+    H,
+    C,
+    R,
+    layoutMode,
+    blendPct,
+    mode,
+    overlayAlpha,
+  });
   const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
   const link = document.createElement("a");
   link.download = "metta-logo-mosaic.svg";
@@ -294,15 +307,22 @@ async function imageToDataURL(img, mime = "image/png", quality = 0.92) {
   return c.toDataURL(mime, quality);
 }
 
-// NEW: build an SVG string that embeds tile images and clips to the logo
-async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
-  // compute tile rects like your canvas code
+async function buildSVGString({
+  W,
+  H,
+  C,
+  R,
+  layoutMode,
+  blendPct,
+  mode = "mask",
+  overlayAlpha = 0.8,
+}) {
   const tileW = Math.ceil(W / C);
   const tileH = Math.ceil(H / R);
 
   const orderImgs = lastTilesOrder.length ? lastTilesOrder : tileImgs.slice();
 
-  // compute logo fit to canvas area
+  // logo box
   const lr = logoImg.width / logoImg.height;
   const ar = W / H;
   let lw, lh, lx, ly;
@@ -318,7 +338,7 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
     lx = (W - lw) / 2;
   }
 
-  // prepare clipping or masking defs
+  // defs: clip or mask
   let defs = "";
   let mainClipRef = "";
   if (logoSVGText) {
@@ -334,22 +354,17 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
   </clipPath>`;
     mainClipRef = `clip-path="url(#${clipId})"`;
   } else {
-    // bitmap logo used as a luminance mask
     const maskId = "logoMask";
-    // embed the logo bitmap as data URL so the SVG is portable
     const logoDataURL = await imageToDataURL(logoImg, "image/png", 0.92);
     defs += `
-      <mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"
-      mask-type="luminance" x="0" y="0" width="${W}" height="${H}">
-        <rect x="0" y="0" width="${W}" height="${H}" fill="black"/>
-      <image x="${lx}" y="${ly}" width="${lw}" height="${lh}"
-      href="${logoDataURL}" xlink:href="${logoDataURL}"
-      preserveAspectRatio="xMidYMid meet" />
-      </mask>`;
+  <mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" mask-type="luminance" x="0" y="0" width="${W}" height="${H}">
+    <rect x="0" y="0" width="${W}" height="${H}" fill="black"/>
+    <image x="${lx}" y="${ly}" width="${lw}" height="${lh}" href="${logoDataURL}" xlink:href="${logoDataURL}" preserveAspectRatio="xMidYMid meet" />
+  </mask>`;
     mainClipRef = `mask="url(#${maskId})"`;
   }
 
-  // tiles group
+  // tiles
   let tilesMarkup = "";
   if (layoutMode === "grid") {
     let k = 0;
@@ -360,14 +375,11 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
         const href = tileDataURLs[idx];
         const dx = x * tileW;
         const dy = y * tileH;
-        // preserveAspectRatio slice to mimic cover
         tilesMarkup += `<image x="${dx}" y="${dy}" width="${tileW}" height="${tileH}" href="${href}" xlink:href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
         k++;
       }
     }
   } else {
-    // Random fill uses the same positions as the last canvas render
-    // If none exist, create them once so SVG and PNG stay consistent
     const positions = lastRandomPositions.length
       ? lastRandomPositions
       : Array.from({ length: Math.floor(C * R * 1.1) }, () => {
@@ -379,21 +391,19 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
             h: w,
           };
         });
-
     for (let i = 0; i < positions.length; i++) {
       const img = orderImgs[i % orderImgs.length];
       const idx = tileImgs.indexOf(img);
       const href = tileDataURLs[idx];
       const { x, y, w, h } = positions[i];
-
-      tilesMarkup += `<image x="${x.toFixed(2)}" y="${y.toFixed(2)}"
-                           width="${w.toFixed(2)}" height="${h.toFixed(2)}"
-                           href="${href}" xlink:href="${href}"
-                           preserveAspectRatio="xMidYMid slice" />\n`;
+      tilesMarkup += `<image x="${x.toFixed(2)}" y="${y.toFixed(
+        2
+      )}" width="${w.toFixed(2)}" height="${h.toFixed(
+        2
+      )}" href="${href}" xlink:href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
     }
   }
 
-  // optional tint blend using a semi transparent white rect inside the same group
   const tintRect =
     blendPct > 0
       ? `<rect x="0" y="0" width="${W}" height="${H}" fill="#dddddd" opacity="${(
@@ -401,20 +411,35 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
         ).toFixed(3)}" />`
       : "";
 
-  // final SVG document
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+  const baseSvgOpen = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg"
-xmlns:xlink="http://www.w3.org/1999/xlink"
-width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     ${defs}
-  </defs>
+  </defs>`;
+
+  if (mode === "overlay") {
+    const logoDataURL = await imageToDataURL(logoImg, "image/png", 0.92);
+    return `${baseSvgOpen}
+  <g>
+    ${tilesMarkup}
+    ${tintRect}
+    <image x="${lx}" y="${ly}" width="${lw}" height="${lh}"
+           href="${logoDataURL}" xlink:href="${logoDataURL}"
+           opacity="${overlayAlpha.toFixed(3)}"
+           preserveAspectRatio="xMidYMid meet" />
+  </g>
+</svg>`;
+  }
+
+  // mask mode
+  return `${baseSvgOpen}
   <g ${mainClipRef}>
     ${tilesMarkup}
     ${tintRect}
   </g>
 </svg>`;
-  return svg;
 }
 
 async function render() {
@@ -431,7 +456,7 @@ async function render() {
   const tileW = Math.ceil(W / C);
   const tileH = Math.ceil(H / R);
 
-  console.log(`Rendering at ${W} × ${H} px with ${C} × ${R} tiles`); // NEW
+  console.log(`Rendering at ${W} × ${H} px with ${C} × ${R} tiles`);
   if (tileW < 16 || tileH < 16) {
     console.warn(
       "Tiles under 16 px. Reduce columns or rows for a sharper look."
@@ -465,7 +490,7 @@ async function render() {
     }
   } else {
     const count = Math.floor(C * R * 1.1);
-    lastRandomPositions = []; // reset
+    lastRandomPositions = [];
     for (let i = 0; i < count; i++) {
       const img = tiles[i % tiles.length];
       const w = tileW * (0.75 + Math.random() * 0.9);
@@ -478,30 +503,20 @@ async function render() {
     }
   }
 
-  // Optional: switch to a softer multiply tint instead of white wash
   const blendPct = parseInt(blend.value || 0, 10);
   if (blendPct > 0) {
-    mctx.globalCompositeOperation = "multiply"; // CHANGED
-    mctx.fillStyle = "#dddddd"; // CHANGED
+    mctx.globalCompositeOperation = "multiply";
+    mctx.fillStyle = "#dddddd";
     mctx.globalAlpha = blendPct / 100;
     mctx.fillRect(0, 0, W, H);
     mctx.globalAlpha = 1;
     mctx.globalCompositeOperation = "source-over";
   }
 
-  ctx.imageSmoothingEnabled = false; // MOVED UP
+  ctx.imageSmoothingEnabled = false;
   ctx.drawImage(mosaic, 0, 0);
 
-  const mask = HAS_OFFSCREEN
-    ? new OffscreenCanvas(W, H)
-    : document.createElement("canvas");
-  if (!HAS_OFFSCREEN) {
-    mask.width = W;
-    mask.height = H;
-  }
-  const maskCtx = mask.getContext("2d");
-  maskCtx.imageSmoothingEnabled = false;
-
+  // Compute logo box ONCE
   const lr = logoImg.width / logoImg.height;
   const ar = W / H;
   let lw, lh, lx, ly;
@@ -517,7 +532,7 @@ async function render() {
     lx = (W - lw) / 2;
   }
 
-  // NEW: warn if the logo must be upscaled a lot
+  // Warn if upscaling logo a lot
   const logoScale = Math.max(lw / logoImg.width, lh / logoImg.height);
   if (logoScale > 1.25) {
     console.warn(
@@ -525,24 +540,8 @@ async function render() {
     );
   }
 
-  // place logo (same math you already have above)
-  const lr = logoImg.width / logoImg.height;
-  const ar = W / H;
-  let lw, lh, lx, ly;
-  if (lr > ar) {
-    lw = W;
-    lh = W / lr;
-    lx = 0;
-    ly = (H - lh) / 2;
-  } else {
-    lh = H;
-    lw = H * lr;
-    ly = 0;
-    lx = (W - lw) / 2;
-  }
-
+  // Overlay vs Mask
   if (logoMode.value === "overlay") {
-    // OPTION B: draw full mosaic everywhere, then the coloured logo on top
     ctx.save();
     ctx.globalAlpha = Math.max(
       0,
@@ -551,7 +550,6 @@ async function render() {
     ctx.drawImage(logoImg, lx, ly, lw, lh);
     ctx.restore();
   } else {
-    // original mask mode: keep mosaic only inside logo
     const mask = HAS_OFFSCREEN
       ? new OffscreenCanvas(W, H)
       : document.createElement("canvas");
@@ -572,10 +570,6 @@ async function render() {
   lastTilesOrder = drawnTiles.map((t) => t.img);
   dlBtn.disabled = false;
   dlSvgBtn.disabled = false;
-
-  dlBtn.disabled = false;
-  dlSvgBtn.disabled = false;
 }
 
-// optional but handy: reveal blend percent on load
 blendVal.textContent = blend.value + "%";
