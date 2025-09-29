@@ -557,6 +557,18 @@ async function buildSVGString({
 
   const orderImgs = lastTilesOrder.length ? lastTilesOrder : tileImgs.slice();
 
+  if (!imgToHref || imgToHref.size !== tileImgs.length) {
+    imgToHref = new Map();
+    for (let i = 0; i < tileImgs.length; i++) {
+      // reuse existing data URLs if you have them; otherwise create now
+      imgToHref.set(
+        tileImgs[i],
+        tileDataURLs[i] ||
+          (await imageToDataURL(tileImgs[i], "image/jpeg", 0.92))
+      );
+    }
+  }
+
   // logo box
   const lr = logoImg.width / logoImg.height;
   const ar = W / H;
@@ -622,9 +634,11 @@ async function buildSVGString({
     const maskId = "logoMask";
     const logoDataURL = await imageToDataURL(logoImg, "image/png", 0.92);
     defs += `
-  <mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"  x="0" y="0" width="${W}" height="${H}">
+<mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"
+x="0" y="0" width="${W}" height="${H}" style="mask-type:alpha">
     <rect x="0" y="0" width="${W}" height="${H}" fill="black"/>
-    <image x="${lx}" y="${ly}" width="${lw}" height="${lh}" href="${logoDataURL}" preserveAspectRatio="xMidYMid meet" />
+    <image x="${lx}" y="${ly}" width="${lw}" height="${lh}" href="${logoDataURL}" xlink:href="${logoDataURL}" preserveAspectRatio="xMidYMid meet" />
+
   </mask>`;
     mainClipRef = `mask="url(#${maskId})"`;
   }
@@ -633,13 +647,18 @@ async function buildSVGString({
   let tilesMarkup = "";
   if (layoutMode === "grid") {
     let k = 0;
+    // in buildSVGString, grid branch
     for (let y = 0; y < R; y++) {
       for (let x = 0; x < C; x++) {
         const img = orderImgs[k % orderImgs.length];
         const href = imgToHref.get(img);
+        if (!href) {
+          k++;
+          continue;
+        } // guard
         const dx = x * tileW;
         const dy = y * tileH;
-        tilesMarkup += `<image x="${dx}" y="${dy}" width="${tileW}" height="${tileH}" href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
+        tilesMarkup += `<image x="${dx}" y="${dy}" width="${tileW}" height="${tileH}" href="${href}" xlink:href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
         k++;
       }
     }
@@ -664,11 +683,10 @@ async function buildSVGString({
       const href = imgToHref.get(img);
       if (!href) continue; // guard (shouldn't happen, but safe)
       const { x, y, w, h } = positions[i];
-      tilesMarkup += `<image x="${x.toFixed(2)}" y="${y.toFixed(
-        2
-      )}" width="${w.toFixed(2)}" height="${h.toFixed(
-        2
-      )}" href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
+      tilesMarkup += `<image x="${x.toFixed(2)}" y="${y.toFixed(2)}"
+width="${w.toFixed(2)}" height="${h.toFixed(2)}"
+href="${href}" xlink:href="${href}"
+preserveAspectRatio="xMidYMid slice" />\n`;
     }
   }
 
@@ -680,7 +698,7 @@ async function buildSVGString({
       : "";
 
   const baseSvgOpen = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg"
+  <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
      width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     ${defs}
@@ -710,9 +728,11 @@ async function buildSVGString({
     } else {
       const data = await imageToDataURL(logoImg, "image/png", 0.92);
       overlayLogo = `
-    <image x="${lx}" y="${ly}" width="${lw}" height="${lh}"
-           href="${data}" opacity="${overlayAlpha.toFixed(3)}"
-           preserveAspectRatio="xMidYMid meet" />`;
+      <image x="${lx}" y="${ly}" width="${lw}" height="${lh}"
+      href="${data}" xlink:href="${data}"
+      opacity="${overlayAlpha.toFixed(3)}"
+      preserveAspectRatio="xMidYMid meet" />
+      `;
     }
 
     return `${baseSvgOpen}
@@ -731,6 +751,72 @@ async function buildSVGString({
     ${tintRect}
   </g>
 </svg>`;
+}
+
+// Utility for smooth edge falloff instead of a hard cutoff
+function smoothstep(edge0, edge1, x) {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+// Build an alpha mask from logo brightness
+// White becomes transparent, black becomes opaque by default
+function buildLumaMask(img, W, H, lx, ly, lw, lh, opts = {}) {
+  const {
+    invert = false, // set true if your logo is light on dark and you want the opposite
+    threshold = 0.92, // pixels brighter than this start to vanish
+    softness = 0.08, // fade width around the threshold for nicer edges
+  } = opts;
+
+  // draw logo into a temp canvas at the exact placement and size
+  const tmp = document.createElement("canvas");
+  tmp.width = W;
+  tmp.height = H;
+  const tctx = tmp.getContext("2d", { willReadFrequently: true });
+  tctx.clearRect(0, 0, W, H);
+  tctx.drawImage(img, lx, ly, lw, lh);
+
+  const buf = tctx.getImageData(0, 0, W, H);
+  const d = buf.data;
+
+  // convert brightness to alpha
+  // perceived luminance coefficients
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i] / 255;
+    const g = d[i + 1] / 255;
+    const b = d[i + 2] / 255;
+    const aIn = d[i + 3] / 255;
+
+    // if input pixel is fully transparent, keep it transparent
+    if (aIn === 0) {
+      d[i + 3] = 0;
+      continue;
+    }
+
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+    // map luminance to desired alpha
+    // baseAlpha is 1 for black, 0 for white
+    let baseAlpha = 1 - lum;
+    if (invert) baseAlpha = 1 - baseAlpha;
+
+    // apply soft thresholding
+    // below lo keep, above hi drop, in between fade
+    const lo = Math.max(0, threshold - softness);
+    const hi = Math.min(1, threshold + softness);
+    const k = 1 - smoothstep(lo, hi, 1 - baseAlpha); // flip to make white disappear nicely
+
+    const outA = Math.max(0, Math.min(1, baseAlpha * k));
+
+    // multiply by original alpha to respect vector transparency if present
+    d[i + 3] = Math.round(outA * aIn * 255);
+
+    // optional: clear RGB to neutral to avoid fringe when debugging
+    // d[i] = d[i + 1] = d[i + 2] = 0;
+  }
+
+  tctx.putImageData(buf, 0, 0);
+  return tmp;
 }
 
 async function render() {
@@ -774,6 +860,7 @@ async function render() {
   const mctx = mosaic.getContext("2d");
   mctx.imageSmoothingEnabled = false;
 
+  // draw mosaic onto mctx
   if (layout.value === "grid") {
     let k = 0;
     for (let y = 0; y < R; y++) {
@@ -859,27 +946,27 @@ async function render() {
     );
     ctx.drawImage(logoImg, lx, ly, lw, lh);
     ctx.restore();
-    // overlay covers visually, no need to draw into maskCtx for hover
   } else {
-    const mask = HAS_OFFSCREEN
-      ? new OffscreenCanvas(W, H)
-      : document.createElement("canvas");
-    if (!HAS_OFFSCREEN) {
-      mask.width = W;
-      mask.height = H;
-    }
-    const _maskCtx = mask.getContext("2d");
-    _maskCtx.imageSmoothingEnabled = false;
-    _maskCtx.clearRect(0, 0, W, H);
-    _maskCtx.drawImage(logoImg, lx, ly, lw, lh);
+    // create a luminance based mask so white becomes transparent
+    const lumaMask = buildLumaMask(logoImg, W, H, lx, ly, lw, lh, {
+      threshold: 0.92, // raise if background is slightly grey
+      softness: 0.1, // raise for smoother edges
+      invert: false, // set true if you want light logo areas to show
+    });
 
-    // destination-in to clip mosaic to logo
+    // apply mask to the visible mosaic
+    ctx.save();
     ctx.globalCompositeOperation = "destination-in";
-    ctx.drawImage(mask, 0, 0);
-    ctx.globalCompositeOperation = "source-over";
+    ctx.drawImage(lumaMask, 0, 0);
+    ctx.restore();
 
-    // also keep a copy for fast hover checks
-    maskCtx.drawImage(logoImg, lx, ly, lw, lh);
+    // use the same mask for hover hit testing
+    if (!maskCanvas) maskCanvas = document.createElement("canvas");
+    maskCanvas.width = W;
+    maskCanvas.height = H;
+    maskCtx = maskCanvas.getContext("2d");
+    maskCtx.clearRect(0, 0, W, H);
+    maskCtx.drawImage(lumaMask, 0, 0);
   }
 
   lastTilesOrder = drawnTiles.map((t) => t.img);
