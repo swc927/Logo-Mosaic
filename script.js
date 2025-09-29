@@ -45,23 +45,31 @@ let hoverRAF = null;
 // NEW: lightweight hover mask buffers
 let maskCanvas = null;
 let maskCtx = null;
+let imgToHref = new Map();
 
 cv.addEventListener("mousemove", (e) => {
-  if (!drawnTiles.length) return;
-  if (hoverRAF) return;
+  if (!drawnTiles.length || hoverRAF) return;
+
+  const clientX = e.clientX;
+  const clientY = e.clientY;
+
   hoverRAF = requestAnimationFrame(() => {
     hoverRAF = null;
+
     const rect = cv.getBoundingClientRect();
     const scaleX = cv.width / rect.width;
     const scaleY = cv.height / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
 
-    // CHANGED: use maskCtx for alpha check in mask mode only
+    // mask hit test only in mask mode
     const needMaskCheck = logoMode.value !== "overlay";
-    if (needMaskCheck && maskCtx) {
-      const a = maskCtx.getImageData(Math.floor(x), Math.floor(y), 1, 1)
-        .data[3];
+    if (needMaskCheck) {
+      if (!maskCtx) {
+        hoverPreview.style.display = "none";
+        return;
+      }
+      const a = safeAlphaAt(maskCtx, x, y);
       if (a === 0) {
         hoverPreview.style.display = "none";
         return;
@@ -74,23 +82,29 @@ cv.addEventListener("mousemove", (e) => {
       return;
     }
 
-    hoverImg.src = hit.img.src;
+    // only update src if changed (prevents flicker / re-decode)
+    if (hoverImg.src !== hit.img.src) hoverImg.src = hit.img.src;
     hoverPreview.style.display = "block";
 
-    // CHANGED: clamp preview so it remains on screen
-    const pad = 16;
-    const vpW = window.innerWidth;
-    const vpH = window.innerHeight;
-    const box = hoverPreview.getBoundingClientRect();
-    let left = e.clientX + pad;
-    let top = e.clientY + pad;
-    if (left + box.width > vpW) left = e.clientX - box.width - pad;
-    if (top + box.height > vpH) top = e.clientY - box.height - pad;
-
-    hoverPreview.style.left = left + "px";
-    hoverPreview.style.top = top + "px";
+    // position tooltip next frame (so it has dimensions)
+    requestAnimationFrame(() => {
+      const pad = 16;
+      const vpW = window.innerWidth;
+      const vpH = window.innerHeight;
+      const box = hoverPreview.getBoundingClientRect();
+      let left = clientX + pad;
+      let top = clientY + pad;
+      if (left + box.width > vpW) left = clientX - box.width - pad;
+      if (top + box.height > vpH) top = clientY - box.height - pad;
+      hoverPreview.style.left = left + "px";
+      hoverPreview.style.top = top + "px";
+    });
   });
 });
+
+function isUnsupportedRaster(type) {
+  return /image\/(heic|heif)/i.test(type || "");
+}
 
 // pointer helpers
 function findTileAt(px, py) {
@@ -102,29 +116,29 @@ function findTileAt(px, py) {
   return null;
 }
 
-cv.addEventListener("mouseleave", () => {
-  hoverPreview.style.display = "none";
-});
+cv.addEventListener("pointerdown", (e) => {
+  if (e.pointerType !== "touch") return;
+  e.preventDefault();
 
-cv.addEventListener("click", (e) => {
   const rect = cv.getBoundingClientRect();
   const scaleX = cv.width / rect.width;
   const scaleY = cv.height / rect.height;
   const x = (e.clientX - rect.left) * scaleX;
   const y = (e.clientY - rect.top) * scaleY;
 
-  // CHANGED: use maskCtx for alpha check in mask mode only
   const needMaskCheck = logoMode.value !== "overlay";
-  if (needMaskCheck && maskCtx) {
-    const a = maskCtx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data[3];
-    if (a === 0) {
-      hoverPreview.style.display = "none";
-      return;
-    }
+  if (needMaskCheck) {
+    if (!maskCtx) return;
+    const a = safeAlphaAt(maskCtx, x, y);
+    if (a === 0) return;
   }
 
   const hit = findTileAt(x, y);
   if (!hit) return;
+
+  if (hoverImg.src !== hit.img.src) hoverImg.src = hit.img.src;
+  hoverPreview.style.display = "block";
+
   lightboxImg.src = hit.img.src;
   lightbox.style.display = "flex";
 });
@@ -133,6 +147,76 @@ cv.addEventListener("click", (e) => {
 lightbox.addEventListener("click", () => {
   lightbox.style.display = "none";
 });
+
+function safeAlphaAt(ctx, x, y) {
+  try {
+    return ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data[3] || 0;
+  } catch {
+    return 255; // assume opaque so UX still works
+  }
+}
+
+// ADD: strict SVG sanitiser and normaliser for decoding
+function sanitiseSVG(svgText) {
+  // Strip external URLs in href/xlink:href and url(...)
+  svgText = svgText.replace(/xlink:href\s*=\s*"(http[^"]+)"/gi, "");
+  svgText = svgText.replace(/\shref\s*=\s*"(http[^"]+)"/gi, "");
+  svgText = svgText.replace(/url\((['"]?)(http[^)]+)\1\)/gi, "none");
+
+  const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+  const svg = doc.documentElement;
+
+  // Remove <script> and <foreignObject>
+  doc.querySelectorAll("script, foreignObject").forEach((el) => el.remove());
+
+  // Remove any inline event handlers: onload, onclick, etc.
+  const walker = doc.createTreeWalker(svg, NodeFilter.SHOW_ELEMENT);
+  while (walker.nextNode()) {
+    const el = walker.currentNode;
+    // clone attributes to avoid live list issues
+    [...el.attributes].forEach((attr) => {
+      if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+      // Also remove external refs that slipped through on attributes
+      if (
+        (attr.name === "href" || attr.name === "xlink:href") &&
+        /^http/i.test(attr.value)
+      ) {
+        el.removeAttribute(attr.name);
+      }
+      // Clean style URLs: url(http...) -> none
+      if (attr.name === "style") {
+        el.setAttribute(
+          "style",
+          attr.value.replace(/url\((['"]?)(http[^)]+)\1\)/gi, "none")
+        );
+      }
+    });
+  }
+
+  // Ensure viewBox exists and width/height are valid px numbers
+  let vb = svg.getAttribute("viewBox");
+  let w = svg.getAttribute("width");
+  let h = svg.getAttribute("height");
+
+  const isPercent = (v) => v && /%$/.test(v.trim());
+  if (!vb) {
+    const wNum = parseFloat(w);
+    const hNum = parseFloat(h);
+    if (wNum > 0 && hNum > 0 && !isNaN(wNum) && !isNaN(hNum)) {
+      svg.setAttribute("viewBox", `0 0 ${wNum} ${hNum}`);
+    } else {
+      svg.setAttribute("viewBox", "0 0 1024 1024");
+      w = w || "1024";
+      h = h || "1024";
+    }
+  }
+  if (!w || isPercent(w) || parseFloat(w) <= 0)
+    svg.setAttribute("width", "1024");
+  if (!h || isPercent(h) || parseFloat(h) <= 0)
+    svg.setAttribute("height", "1024");
+
+  return new XMLSerializer().serializeToString(svg);
+}
 
 function enableIfReady() {
   renderBtn.disabled = !(logoImg && tileImgs.length);
@@ -240,16 +324,30 @@ preset.addEventListener("change", () => {
 logoInput.addEventListener("change", async (e) => {
   const f = e.target.files[0];
   if (!f) return;
+
+  // Guard unsupported rasters here
+  if (isUnsupportedRaster(f.type)) {
+    console.error(
+      "Unsupported image type. Please convert HEIC HEIF to PNG or JPEG."
+    );
+    return;
+  }
+
   try {
+    console.debug("Logo file type:", f.type);
     logoFile = f;
     logoSVGText = null;
-    parsedLogo = null; // NEW
+    parsedLogo = null;
+
     if (f.type === "image/svg+xml") {
-      // read text content for clip path or overlay use
-      logoSVGText = await f.text();
-      parsedLogo = parseSVG(logoSVGText); // NEW
+      // Use sanitised SVG for both parsing and preview to avoid external refs issues
+      const raw = await f.text();
+      const clean = sanitiseSVG(raw);
+      logoSVGText = clean;
+      parsedLogo = parseSVG(clean);
     }
-    logoImg = await loadImageFromFile(f);
+
+    logoImg = await loadImageFromFile(f); // will also sanitise SVG internally for raster decode
     enableIfReady();
     dlSvgBtn.disabled = !(logoImg && tileImgs.length);
   } catch (err) {
@@ -264,6 +362,7 @@ tilesInput.addEventListener("change", async (e) => {
     tileDataURLs = await Promise.all(
       tileImgs.map((img) => imageToDataURL(img, "image/jpeg", 0.92))
     );
+    imgToHref = new Map(tileImgs.map((img, i) => [img, tileDataURLs[i]]));
   } catch (err) {
     console.error("Failed to load one or more tiles", err);
   }
@@ -300,9 +399,14 @@ blend.addEventListener("input", () => {
 
 renderBtn.addEventListener("click", render);
 
-// CHANGED: use toBlob for better memory behaviour
 dlBtn.addEventListener("click", () => {
   cv.toBlob((blob) => {
+    if (!blob) {
+      console.error(
+        "Could not export image. Try a smaller size or fewer tiles."
+      );
+      return;
+    }
     const link = document.createElement("a");
     link.download = "metta-logo-mosaic.png";
     link.href = URL.createObjectURL(blob);
@@ -338,28 +442,93 @@ function shuffle(arr) {
 }
 
 async function loadImageFromFile(file) {
-  // Fast path with createImageBitmap when available
+  // Special case for SVG: avoid createImageBitmap entirely
+  // REPLACE the SVG branch inside loadImageFromFile with this
+  if (file && file.type === "image/svg+xml") {
+    let raw = await file.text();
+    const clean = sanitiseSVG(raw);
+
+    const blob = new Blob([clean], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      // ensure immediate decode try
+      img.decoding = "sync";
+      img.onload = async () => {
+        try {
+          if ("decode" in img) await img.decode().catch(() => {});
+        } finally {
+          URL.revokeObjectURL(url);
+          resolve(img);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("SVG could not be decoded after sanitising"));
+      };
+      img.src = url;
+    });
+  }
+
+  // Raster images: try createImageBitmap first, then fall back cleanly
   if ("createImageBitmap" in window) {
-    const bmp = await createImageBitmap(file);
-    const c = document.createElement("canvas");
-    c.width = bmp.width;
-    c.height = bmp.height;
-    c.getContext("2d").drawImage(bmp, 0, 0);
+    try {
+      const bmp = await createImageBitmap(file);
+      const c = document.createElement("canvas");
+      c.width = bmp.width;
+      c.height = bmp.height;
+      c.getContext("2d").drawImage(bmp, 0, 0);
+      const img = new Image();
+      img.src = c.toDataURL("image/png");
+      // wait for decode to be safe before returning
+      if ("decode" in img) {
+        try {
+          await img.decode();
+        } catch {}
+      }
+      return img;
+    } catch {
+      // fall through to object URL path below
+    }
+  }
+
+  // Fallback path: object URL to Image, with a last-chance FileReader route
+  try {
+    const url = URL.createObjectURL(file);
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = async () => {
+        try {
+          if ("decode" in img) await img.decode().catch(() => {});
+        } finally {
+          URL.revokeObjectURL(url);
+          resolve(img);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Raster image could not be decoded"));
+      };
+      img.src = url;
+    });
+  } catch {
+    // Very rare: some environments need DataURL
+    const dataURL = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(file);
+    });
     const img = new Image();
-    img.src = c.toDataURL("image/png");
+    img.src = dataURL;
+    if ("decode" in img) {
+      try {
+        await img.decode();
+      } catch {}
+    }
     return img;
   }
-  // Fallback for Safari and older browsers
-  const url = URL.createObjectURL(file);
-  return await new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = reject;
-    img.src = url;
-  });
 }
 
 // helper  draw an HTMLImageElement into a canvas to get a data URL
@@ -467,8 +636,7 @@ async function buildSVGString({
     for (let y = 0; y < R; y++) {
       for (let x = 0; x < C; x++) {
         const img = orderImgs[k % orderImgs.length];
-        const idx = tileImgs.indexOf(img);
-        const href = tileDataURLs[idx];
+        const href = imgToHref.get(img);
         const dx = x * tileW;
         const dy = y * tileH;
         tilesMarkup += `<image x="${dx}" y="${dy}" width="${tileW}" height="${tileH}" href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
@@ -490,10 +658,11 @@ async function buildSVGString({
             };
           }
         ));
+
     for (let i = 0; i < positions.length; i++) {
       const img = orderImgs[i % orderImgs.length];
-      const idx = tileImgs.indexOf(img);
-      const href = tileDataURLs[idx];
+      const href = imgToHref.get(img);
+      if (!href) continue; // guard (shouldn't happen, but safe)
       const { x, y, w, h } = positions[i];
       tilesMarkup += `<image x="${x.toFixed(2)}" y="${y.toFixed(
         2
@@ -669,16 +838,15 @@ async function render() {
     );
   }
 
-  // NEW: build a thin mask buffer for hover checks in mask mode
   if (!maskCanvas) {
     maskCanvas = HAS_OFFSCREEN
       ? new OffscreenCanvas(cv.width, cv.height)
       : document.createElement("canvas");
   }
-  if (!HAS_OFFSCREEN) {
-    maskCanvas.width = cv.width;
-    maskCanvas.height = cv.height;
-  }
+  // Always keep maskCanvas in lockstep with the main canvas
+  maskCanvas.width = W; // <— add this even for OffscreenCanvas
+  maskCanvas.height = H; // <— add this even for OffscreenCanvas
+
   maskCtx = maskCanvas.getContext("2d");
   maskCtx.clearRect(0, 0, W, H);
 
@@ -733,6 +901,10 @@ async function render() {
   el.addEventListener("change", () => {
     if (!renderBtn.disabled) render();
   });
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") lightbox.style.display = "none";
 });
 
 blendVal.textContent = blend.value + "%";

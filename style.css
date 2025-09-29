@@ -115,3 +115,6 @@ canvas {
   color: #cde6ff;
   font-size: 12px;
 }
+#hoverPreview {
+  pointer-events: none;
+}
