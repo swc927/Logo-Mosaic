@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Logo Photo Mosaic by SWC</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <h1>Logo Photo Mosaic by SWC <span class="pill">client side only</span></h1>
+  <p>Upload a clean transparent PNG or SVG of the your logo, then add your event photos. Adjust grid and blending, then export a high resolution PNG. All work is done in your browser.</p>
+
+  <div class="app">
+    <div class="card">
+      <h2>Inputs</h2>
+      <label>Logo PNG (transparent preferred)</label>
+      <input id="logoFile" type="file" accept="image/png,image/svg+xml,image/*" />
+
+      <label>Tile photos</label>
+      <input id="tilesFile" type="file" accept="image/*" multiple />
+      <div id="thumbs" class="thumbs"></div>
+
+      <h2 style="margin-top:14px">Settings</h2>
+      <div class="row">
+        <div>
+          <label>Canvas width px</label>
+          <input id="outW" type="number" min="512" max="8000" step="64" value="3072" />
+        </div>
+        <div>
+          <label>Canvas height px</label>
+          <input id="outH" type="number" min="512" max="8000" step="64" value="3072" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Columns</label>
+          <input id="cols" type="number" min="10" max="400" step="1" value="60" />
+        </div>
+        <div>
+          <label>Rows</label>
+          <input id="rows" type="number" min="10" max="400" step="1" value="60" />
+        </div>
+      </div>
+
+      <label>Preset size</label>
+      <select id="preset">
+        <option value="">Custom</option>
+        <option value="square4k">Square 4096 × 4096</option>
+        <option value="a3p">A3 portrait 3508 × 4961</option>
+        <option value="a3l">A3 landscape 4961 × 3508</option>
+      </select>
+
+
+      <label>Colour blending to logo tint <span id="blendVal">0%</span></label>
+      <input id="blend" type="range" min="0" max="90" value="0" />
+
+      <label>Layout</label>
+      <select id="layout">
+        <option value="grid" selected>Grid fit</option>
+        <option value="random">Random fill</option>
+      </select>
+
+      <label>Shuffle tiles on each render</label>
+      <select id="shuffle">
+        <option value="1" selected>Yes</option>
+        <option value="0">No</option>
+      </select>
+
+      <div class="row" style="margin-top:12px">
+        <button id="renderBtn" disabled>Render mosaic</button>
+        <button id="dlBtn" class="secondary" disabled>Download PNG</button>
+        <button id="dlSvgBtn" class="secondary" disabled>Download SVG</button>
+      </div>
+
+      <p class="note" style="margin-top:12px">Tip: columns x rows decides tile size. More tiles gives a sharper logo but smaller photos. For 50 photos, 50 to 120 tiles per side works well for A3 print.</p>
+    </div>
+
+    <div class="card">
+      <h2>Preview <small id="pxMeta" class="note" style="font-weight:400"></small></h2>
+      <canvas id="cv" width="1536" height="1536"></canvas>
+      <p class="note">The preview is the real output at the size you set. Download will save exactly what you see.</p>
+    </div>
+  </div>
+
+  <div id="hoverPreview" style="position:fixed; pointer-events:none; display:none; border:1px solid #2a3950; background:#0f1420; border-radius:10px; padding:6px;">
+    <img id="hoverImg" src="" alt="" style="width:140px; height:140px; object-fit:cover; border-radius:6px;">
+  </div>
+
+  <div id="lightbox" style="position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center;">
+    <img id="lightboxImg" src="" alt="" style="max-width:90vw; max-height:90vh; border:1px solid #2a3950; border-radius:8px; background:#0a0e14;">
+  </div>
+
+  <script src="script.js"></script>
+</body>
+
+</html>
