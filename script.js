@@ -23,6 +23,14 @@ const lightboxImg = document.getElementById("lightboxImg");
 
 const HAS_OFFSCREEN = typeof OffscreenCanvas !== "undefined";
 
+const logoMode = document.getElementById("logoMode");
+const logoAlpha = document.getElementById("logoAlpha");
+const logoAlphaVal = document.getElementById("logoAlphaVal");
+
+logoAlpha.addEventListener("input", () => {
+  logoAlphaVal.textContent = logoAlpha.value + "%";
+});
+
 let logoImg = null;
 let tileImgs = [];
 let logoFile = null;
@@ -517,13 +525,53 @@ async function render() {
     );
   }
 
-  maskCtx.clearRect(0, 0, W, H);
-  maskCtx.drawImage(logoImg, lx, ly, lw, lh);
+  // place logo (same math you already have above)
+  const lr = logoImg.width / logoImg.height;
+  const ar = W / H;
+  let lw, lh, lx, ly;
+  if (lr > ar) {
+    lw = W;
+    lh = W / lr;
+    lx = 0;
+    ly = (H - lh) / 2;
+  } else {
+    lh = H;
+    lw = H * lr;
+    ly = 0;
+    lx = (W - lw) / 2;
+  }
 
-  ctx.globalCompositeOperation = "destination-in";
-  ctx.drawImage(mask, 0, 0);
-  ctx.globalCompositeOperation = "source-over";
+  if (logoMode.value === "overlay") {
+    // OPTION B: draw full mosaic everywhere, then the coloured logo on top
+    ctx.save();
+    ctx.globalAlpha = Math.max(
+      0,
+      Math.min(1, parseInt(logoAlpha.value || "80", 10) / 100)
+    );
+    ctx.drawImage(logoImg, lx, ly, lw, lh);
+    ctx.restore();
+  } else {
+    // original mask mode: keep mosaic only inside logo
+    const mask = HAS_OFFSCREEN
+      ? new OffscreenCanvas(W, H)
+      : document.createElement("canvas");
+    if (!HAS_OFFSCREEN) {
+      mask.width = W;
+      mask.height = H;
+    }
+    const maskCtx = mask.getContext("2d");
+    maskCtx.imageSmoothingEnabled = false;
+    maskCtx.clearRect(0, 0, W, H);
+    maskCtx.drawImage(logoImg, lx, ly, lw, lh);
+
+    ctx.globalCompositeOperation = "destination-in";
+    ctx.drawImage(mask, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
+  }
+
   lastTilesOrder = drawnTiles.map((t) => t.img);
+  dlBtn.disabled = false;
+  dlSvgBtn.disabled = false;
 
   dlBtn.disabled = false;
   dlSvgBtn.disabled = false;
