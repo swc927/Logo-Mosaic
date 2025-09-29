@@ -1,4 +1,3 @@
-// elements
 const logoInput = document.getElementById("logoFile");
 const tilesInput = document.getElementById("tilesFile");
 const thumbs = document.getElementById("thumbs");
@@ -12,37 +11,101 @@ const layout = document.getElementById("layout");
 const shuffleSel = document.getElementById("shuffle");
 const renderBtn = document.getElementById("renderBtn");
 const dlBtn = document.getElementById("dlBtn");
-const dlSvgBtn = document.getElementById("dlSvgBtn");
 const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d", { willReadFrequently: true });
 const pxMeta = document.getElementById("pxMeta");
 const preset = document.getElementById("preset");
+const dlSvgBtn = document.getElementById("dlSvgBtn");
 const hoverPreview = document.getElementById("hoverPreview");
 const hoverImg = document.getElementById("hoverImg");
 const lightbox = document.getElementById("lightbox");
 const lightboxImg = document.getElementById("lightboxImg");
 
-// feature flag
 const HAS_OFFSCREEN = typeof OffscreenCanvas !== "undefined";
 
-// state
 let logoImg = null;
+let tileImgs = [];
 let logoFile = null;
 let logoSVGText = null;
-let tileImgs = [];
 let tileDataURLs = [];
-let drawnTiles = []; // [{x,y,w,h,img}]
-let lastTilesOrder = []; // [Image,...] for reproducible SVG
-let lastRandomPositions = []; // [{x,y,w,h}] for reproducible SVG random
+let lastTilesOrder = [];
+let lastRandomPositions = [];
+let drawnTiles = []; // array of {x, y, w, h, img}
 let hoverRAF = null;
 
-// utils
+cv.addEventListener("mousemove", (e) => {
+  if (!drawnTiles.length) return;
+  if (hoverRAF) return;
+  hoverRAF = requestAnimationFrame(() => {
+    hoverRAF = null;
+    const rect = cv.getBoundingClientRect();
+    const scaleX = cv.width / rect.width;
+    const scaleY = cv.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    const a = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data[3];
+    if (a === 0) {
+      hoverPreview.style.display = "none";
+      return;
+    }
+
+    const hit = findTileAt(x, y);
+    if (!hit) {
+      hoverPreview.style.display = "none";
+      return;
+    }
+
+    hoverImg.src = hit.img.src;
+    hoverPreview.style.display = "block";
+    hoverPreview.style.left = e.clientX + 16 + "px";
+    hoverPreview.style.top = e.clientY + 16 + "px";
+  });
+});
+
+// pointer helpers
+function findTileAt(px, py) {
+  // scan backwards to prioritise last drawn for random layout overlaps
+  for (let i = drawnTiles.length - 1; i >= 0; i--) {
+    const t = drawnTiles[i];
+    if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) return t;
+  }
+  return null;
+}
+
+cv.addEventListener("mouseleave", () => {
+  hoverPreview.style.display = "none";
+});
+
+cv.addEventListener("click", (e) => {
+  const rect = cv.getBoundingClientRect();
+  const scaleX = cv.width / rect.width;
+  const scaleY = cv.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+
+  const a = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data[3];
+  if (a === 0) {
+    hoverPreview.style.display = "none";
+    return;
+  }
+
+  const hit = findTileAt(x, y);
+  if (!hit) return;
+  lightboxImg.src = hit.img.src;
+  lightbox.style.display = "flex";
+});
+
+// close lightbox on click
+lightbox.addEventListener("click", () => {
+  lightbox.style.display = "none";
+});
+
 function enableIfReady() {
-  const ok = Boolean(logoImg && tileImgs.length);
-  renderBtn.disabled = !ok;
-  dlBtn.disabled = true;
-  dlSvgBtn.disabled = !ok;
-  if (!ok) hoverPreview.style.display = "none";
+  renderBtn.disabled = !(logoImg && tileImgs.length);
+  if (renderBtn.disabled) {
+    hoverPreview.style.display = "none";
+  }
 }
 
 function extractSVGInner(svgText) {
@@ -56,58 +119,122 @@ function setSize(w, h) {
   syncSize();
 }
 
-function syncSize() {
-  const w = Math.max(512, Math.min(8000, parseInt(outW.value || 1536, 10)));
-  const h = Math.max(512, Math.min(8000, parseInt(outH.value || 1536, 10)));
-  cv.width = w;
-  cv.height = h;
-  if (pxMeta) pxMeta.textContent = `export ${cv.width} × ${cv.height} px`;
-}
+dlSvgBtn.addEventListener("click", async () => {
+  // Use the same current settings as the PNG render
+  const W = cv.width;
+  const H = cv.height;
+  const C = Math.max(10, Math.min(400, parseInt(cols.value || 60, 10)));
+  const R = Math.max(10, Math.min(400, parseInt(rows.value || 60, 10)));
+  const layoutMode = layout.value;
+  const blendPct = parseInt(blend.value || 0, 10);
 
-// image loading: fast path with createImageBitmap
-async function loadImageFromFile(file) {
-  if ("createImageBitmap" in window) {
-    const bmp = await createImageBitmap(file);
-    const c = document.createElement("canvas");
-    c.width = bmp.width;
-    c.height = bmp.height;
-    c.getContext("2d").drawImage(bmp, 0, 0);
-    const img = new Image();
-    img.src = c.toDataURL("image/png");
-    return img;
+  const svgString = await buildSVGString({ W, H, C, R, layoutMode, blendPct });
+  const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+  const link = document.createElement("a");
+  link.download = "metta-logo-mosaic.svg";
+  link.href = URL.createObjectURL(blob);
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+
+preset.addEventListener("change", () => {
+  switch (preset.value) {
+    case "square4k":
+      setSize(4096, 4096);
+      break;
+    case "a3p":
+      setSize(3508, 4961);
+      break;
+    case "a3l":
+      setSize(4961, 3508);
+      break;
+    default:
+      // do nothing for Custom
+      break;
   }
-  const url = URL.createObjectURL(file);
-  return await new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = reject;
-    img.src = url;
+});
+
+logoInput.addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    logoFile = f;
+    logoSVGText = null;
+    if (f.type === "image/svg+xml") {
+      // read text content for clip path use
+      logoSVGText = await f.text();
+      // we still want an <img> for the canvas preview
+    }
+    logoImg = await loadImageFromFile(f);
+    enableIfReady();
+    // enable SVG download if we already have tiles too
+    dlSvgBtn.disabled = !(logoImg && tileImgs.length);
+  } catch (err) {
+    console.error("Failed to load logo", err);
+  }
+});
+
+tilesInput.addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files).slice(0, 1000);
+  try {
+    tileImgs = await Promise.all(files.map(loadImageFromFile));
+    tileDataURLs = await Promise.all(
+      tileImgs.map((img) => imageToDataURL(img, "image/jpeg", 0.92))
+    );
+  } catch (err) {
+    console.error("Failed to load one or more tiles", err);
+  }
+  thumbs.innerHTML = "";
+  tileImgs.slice(0, 120).forEach((img) => {
+    const t = document.createElement("img");
+    t.src = img.src;
+    thumbs.appendChild(t);
   });
+  enableIfReady();
+  dlSvgBtn.disabled = !(logoImg && tileImgs.length);
+});
+
+outW.addEventListener("input", syncSize);
+outH.addEventListener("input", syncSize);
+
+function syncSize() {
+  const w = parseInt(outW.value || 1536, 10);
+  const h = parseInt(outH.value || 1536, 10);
+
+  cv.width = Math.max(512, Math.min(8000, w));
+  cv.height = Math.max(512, Math.min(8000, h));
+
+  // update the live export size label every time size changes
+  if (pxMeta) {
+    pxMeta.textContent = `export ${cv.width} × ${cv.height} px`;
+  }
 }
 
-async function imageToDataURL(img, mime = "image/png", quality = 0.92) {
-  const c = document.createElement("canvas");
-  c.width = img.width;
-  c.height = img.height;
-  c.getContext("2d").drawImage(img, 0, 0);
-  return c.toDataURL(mime, quality);
-}
+// ensure canvas reflects initial inputs and the label shows correct size
+syncSize();
+
+blend.addEventListener("input", () => {
+  blendVal.textContent = blend.value + "%";
+});
+
+renderBtn.addEventListener("click", render);
+dlBtn.addEventListener("click", () => {
+  const link = document.createElement("a");
+  link.download = "metta-logo-mosaic.png";
+  link.href = cv.toDataURL("image/png");
+  link.click();
+});
 
 function drawImageCover(dstCtx, img, dx, dy, dw, dh) {
   const ir = img.width / img.height;
   const dr = dw / dh;
   let sx, sy, sw, sh;
   if (ir > dr) {
-    // crop sides
     sh = img.height;
     sw = sh * dr;
     sx = (img.width - sw) * 0.5;
     sy = 0;
   } else {
-    // crop top or bottom
     sw = img.width;
     sh = sw / dr;
     sx = 0;
@@ -124,155 +251,50 @@ function shuffle(arr) {
   return arr;
 }
 
-// events
-preset.addEventListener("change", () => {
-  switch (preset.value) {
-    case "square4k":
-      setSize(4096, 4096);
-      break;
-    case "a3p":
-      setSize(3508, 4961);
-      break;
-    case "a3l":
-      setSize(4961, 3508);
-      break;
-    default:
-      break;
+async function loadImageFromFile(file) {
+  // Fast path with createImageBitmap when available
+  if ("createImageBitmap" in window) {
+    const bmp = await createImageBitmap(file);
+    const c = document.createElement("canvas");
+    c.width = bmp.width;
+    c.height = bmp.height;
+    c.getContext("2d").drawImage(bmp, 0, 0);
+    const img = new Image();
+    img.src = c.toDataURL("image/png");
+    return img;
   }
-});
-
-logoInput.addEventListener("change", async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  logoFile = f;
-  logoSVGText = null;
-  if (f.type === "image/svg+xml") {
-    logoSVGText = await f.text(); // used for true vector clipPath
-  }
-  logoImg = await loadImageFromFile(f); // used for canvas preview and masking
-  enableIfReady();
-});
-
-tilesInput.addEventListener("change", async (e) => {
-  const files = Array.from(e.target.files).slice(0, 1000);
-  tileImgs = await Promise.all(files.map(loadImageFromFile));
-  tileDataURLs = await Promise.all(
-    tileImgs.map((i) => imageToDataURL(i, "image/jpeg", 0.92))
-  );
-
-  thumbs.innerHTML = "";
-  tileImgs.slice(0, 120).forEach((img) => {
-    const t = document.createElement("img");
-    t.src = img.src;
-    thumbs.appendChild(t);
+  // Fallback for Safari and older browsers
+  const url = URL.createObjectURL(file);
+  return await new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = reject;
+    img.src = url;
   });
-  enableIfReady();
-});
-
-outW.addEventListener("input", syncSize);
-outH.addEventListener("input", syncSize);
-syncSize();
-
-blend.addEventListener("input", () => {
-  blendVal.textContent = blend.value + "%";
-});
-
-renderBtn.addEventListener("click", render);
-
-dlBtn.addEventListener("click", () => {
-  const link = document.createElement("a");
-  link.download = "metta-logo-mosaic.png";
-  link.href = cv.toDataURL("image/png");
-  link.click();
-});
-
-dlSvgBtn.addEventListener("click", async () => {
-  const W = cv.width,
-    H = cv.height;
-  const C = Math.max(10, Math.min(400, parseInt(cols.value || 60, 10)));
-  const R = Math.max(10, Math.min(400, parseInt(rows.value || 60, 10)));
-  const layoutMode = layout.value;
-  const blendPct = parseInt(blend.value || 0, 10);
-
-  const svgString = await buildSVGString({ W, H, C, R, layoutMode, blendPct });
-  const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
-  const link = document.createElement("a");
-  link.download = "metta-logo-mosaic.svg";
-  link.href = URL.createObjectURL(blob);
-  link.click();
-  URL.revokeObjectURL(link.href);
-});
-
-// hover and click inspect
-cv.addEventListener("mousemove", (e) => {
-  if (!drawnTiles.length) return;
-  if (hoverRAF) return;
-  hoverRAF = requestAnimationFrame(() => {
-    hoverRAF = null;
-    const rect = cv.getBoundingClientRect();
-    const scaleX = cv.width / rect.width;
-    const scaleY = cv.height / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
-    const a = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data[3];
-    if (a === 0) {
-      hoverPreview.style.display = "none";
-      return;
-    }
-    const hit = findTileAt(x, y);
-    if (!hit) {
-      hoverPreview.style.display = "none";
-      return;
-    }
-    hoverImg.src = hit.img.src;
-    hoverPreview.style.display = "block";
-    hoverPreview.style.left = e.clientX + 16 + "px";
-    hoverPreview.style.top = e.clientY + 16 + "px";
-  });
-});
-
-cv.addEventListener("mouseleave", () => {
-  hoverPreview.style.display = "none";
-});
-
-cv.addEventListener("click", (e) => {
-  const rect = cv.getBoundingClientRect();
-  const scaleX = cv.width / rect.width;
-  const scaleY = cv.height / rect.height;
-  const x = (e.clientX - rect.left) * scaleX;
-  const y = (e.clientY - rect.top) * scaleY;
-  const a = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data[3];
-  if (a === 0) {
-    hoverPreview.style.display = "none";
-    return;
-  }
-  const hit = findTileAt(x, y);
-  if (!hit) return;
-  lightboxImg.src = hit.img.src;
-  lightbox.style.display = "flex";
-});
-
-lightbox.addEventListener("click", () => {
-  lightbox.style.display = "none";
-});
-
-// hit test helper
-function findTileAt(px, py) {
-  for (let i = drawnTiles.length - 1; i >= 0; i--) {
-    const t = drawnTiles[i];
-    if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) return t;
-  }
-  return null;
 }
 
-// SVG builder
+// helper  draw an HTMLImageElement into a canvas to get a data URL
+async function imageToDataURL(img, mime = "image/png", quality = 0.92) {
+  const c = document.createElement("canvas");
+  c.width = img.width;
+  c.height = img.height;
+  const cctx = c.getContext("2d");
+  cctx.drawImage(img, 0, 0);
+  return c.toDataURL(mime, quality);
+}
+
+// NEW: build an SVG string that embeds tile images and clips to the logo
 async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
+  // compute tile rects like your canvas code
   const tileW = Math.ceil(W / C);
   const tileH = Math.ceil(H / R);
 
   const orderImgs = lastTilesOrder.length ? lastTilesOrder : tileImgs.slice();
 
-  // fit logo to canvas
+  // compute logo fit to canvas area
   const lr = logoImg.width / logoImg.height;
   const ar = W / H;
   let lw, lh, lx, ly;
@@ -288,9 +310,9 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
     lx = (W - lw) / 2;
   }
 
+  // prepare clipping or masking defs
   let defs = "";
   let mainClipRef = "";
-
   if (logoSVGText) {
     const clipId = "logoClip";
     const inner = extractSVGInner(logoSVGText);
@@ -304,16 +326,22 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
   </clipPath>`;
     mainClipRef = `clip-path="url(#${clipId})"`;
   } else {
+    // bitmap logo used as a luminance mask
     const maskId = "logoMask";
+    // embed the logo bitmap as data URL so the SVG is portable
     const logoDataURL = await imageToDataURL(logoImg, "image/png", 0.92);
     defs += `
-  <mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" mask-type="luminance" x="0" y="0" width="${W}" height="${H}">
-    <rect x="0" y="0" width="${W}" height="${H}" fill="black"/>
-    <image x="${lx}" y="${ly}" width="${lw}" height="${lh}" href="${logoDataURL}" preserveAspectRatio="xMidYMid meet" />
-  </mask>`;
+      <mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"
+      mask-type="luminance" x="0" y="0" width="${W}" height="${H}">
+        <rect x="0" y="0" width="${W}" height="${H}" fill="black"/>
+      <image x="${lx}" y="${ly}" width="${lw}" height="${lh}"
+      href="${logoDataURL}" xlink:href="${logoDataURL}"
+      preserveAspectRatio="xMidYMid meet" />
+      </mask>`;
     mainClipRef = `mask="url(#${maskId})"`;
   }
 
+  // tiles group
   let tilesMarkup = "";
   if (layoutMode === "grid") {
     let k = 0;
@@ -324,11 +352,14 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
         const href = tileDataURLs[idx];
         const dx = x * tileW;
         const dy = y * tileH;
-        tilesMarkup += `<image x="${dx}" y="${dy}" width="${tileW}" height="${tileH}" href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
+        // preserveAspectRatio slice to mimic cover
+        tilesMarkup += `<image x="${dx}" y="${dy}" width="${tileW}" height="${tileH}" href="${href}" xlink:href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
         k++;
       }
     }
   } else {
+    // Random fill uses the same positions as the last canvas render
+    // If none exist, create them once so SVG and PNG stay consistent
     const positions = lastRandomPositions.length
       ? lastRandomPositions
       : Array.from({ length: Math.floor(C * R * 1.1) }, () => {
@@ -340,19 +371,21 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
             h: w,
           };
         });
+
     for (let i = 0; i < positions.length; i++) {
       const img = orderImgs[i % orderImgs.length];
       const idx = tileImgs.indexOf(img);
       const href = tileDataURLs[idx];
       const { x, y, w, h } = positions[i];
-      tilesMarkup += `<image x="${x.toFixed(2)}" y="${y.toFixed(
-        2
-      )}" width="${w.toFixed(2)}" height="${h.toFixed(
-        2
-      )}" href="${href}" preserveAspectRatio="xMidYMid slice" />\n`;
+
+      tilesMarkup += `<image x="${x.toFixed(2)}" y="${y.toFixed(2)}"
+                           width="${w.toFixed(2)}" height="${h.toFixed(2)}"
+                           href="${href}" xlink:href="${href}"
+                           preserveAspectRatio="xMidYMid slice" />\n`;
     }
   }
 
+  // optional tint blend using a semi transparent white rect inside the same group
   const tintRect =
     blendPct > 0
       ? `<rect x="0" y="0" width="${W}" height="${H}" fill="#dddddd" opacity="${(
@@ -360,30 +393,42 @@ async function buildSVGString({ W, H, C, R, layoutMode, blendPct }) {
         ).toFixed(3)}" />`
       : "";
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-  <defs>${defs}
+  // final SVG document
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+xmlns:xlink="http://www.w3.org/1999/xlink"
+width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <defs>
+    ${defs}
   </defs>
   <g ${mainClipRef}>
     ${tilesMarkup}
     ${tintRect}
   </g>
 </svg>`;
+  return svg;
 }
 
-// render
 async function render() {
   if (!(logoImg && tileImgs.length)) return;
 
   drawnTiles = [];
-  const W = cv.width,
-    H = cv.height;
+
+  const W = cv.width;
+  const H = cv.height;
   ctx.clearRect(0, 0, W, H);
 
   const C = Math.max(10, Math.min(400, parseInt(cols.value || 60, 10)));
   const R = Math.max(10, Math.min(400, parseInt(rows.value || 60, 10)));
-  const tileW = Math.ceil(W / C),
-    tileH = Math.ceil(H / R);
+  const tileW = Math.ceil(W / C);
+  const tileH = Math.ceil(H / R);
+
+  console.log(`Rendering at ${W} × ${H} px with ${C} × ${R} tiles`); // NEW
+  if (tileW < 16 || tileH < 16) {
+    console.warn(
+      "Tiles under 16 px. Reduce columns or rows for a sharper look."
+    );
+  }
 
   let tiles = tileImgs.slice();
   if (shuffleSel.value === "1") tiles = shuffle(tiles);
@@ -412,7 +457,7 @@ async function render() {
     }
   } else {
     const count = Math.floor(C * R * 1.1);
-    lastRandomPositions = [];
+    lastRandomPositions = []; // reset
     for (let i = 0; i < count; i++) {
       const img = tiles[i % tiles.length];
       const w = tileW * (0.75 + Math.random() * 0.9);
@@ -425,20 +470,20 @@ async function render() {
     }
   }
 
+  // Optional: switch to a softer multiply tint instead of white wash
   const blendPct = parseInt(blend.value || 0, 10);
   if (blendPct > 0) {
-    mctx.globalCompositeOperation = "multiply";
-    mctx.fillStyle = "#dddddd";
+    mctx.globalCompositeOperation = "multiply"; // CHANGED
+    mctx.fillStyle = "#dddddd"; // CHANGED
     mctx.globalAlpha = blendPct / 100;
     mctx.fillRect(0, 0, W, H);
     mctx.globalAlpha = 1;
     mctx.globalCompositeOperation = "source-over";
   }
 
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = false; // MOVED UP
   ctx.drawImage(mosaic, 0, 0);
 
-  // logo mask
   const mask = HAS_OFFSCREEN
     ? new OffscreenCanvas(W, H)
     : document.createElement("canvas");
@@ -464,12 +509,13 @@ async function render() {
     lx = (W - lw) / 2;
   }
 
-  // gentle warning if logo is being upscaled heavily
-  const scaleWarn = Math.max(lw / logoImg.width, lh / logoImg.height);
-  if (scaleWarn > 1.25)
+  // NEW: warn if the logo must be upscaled a lot
+  const logoScale = Math.max(lw / logoImg.width, lh / logoImg.height);
+  if (logoScale > 1.25) {
     console.warn(
-      `Logo upscaled ${scaleWarn.toFixed(2)}x. Prefer a larger PNG or an SVG.`
+      `Logo upscaled ${logoScale.toFixed(2)}x. Prefer a larger PNG or an SVG.`
     );
+  }
 
   maskCtx.clearRect(0, 0, W, H);
   maskCtx.drawImage(logoImg, lx, ly, lw, lh);
@@ -477,12 +523,11 @@ async function render() {
   ctx.globalCompositeOperation = "destination-in";
   ctx.drawImage(mask, 0, 0);
   ctx.globalCompositeOperation = "source-over";
-
   lastTilesOrder = drawnTiles.map((t) => t.img);
 
   dlBtn.disabled = false;
   dlSvgBtn.disabled = false;
 }
 
-// init
+// optional but handy: reveal blend percent on load
 blendVal.textContent = blend.value + "%";
